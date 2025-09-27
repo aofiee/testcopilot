@@ -1,0 +1,273 @@
+# README — GoFiber v2 HMAC Service (Hexagonal) for copilot cli
+
+**ภาษา:** ไทย
+
+## สรุปโปรเจกต์
+
+โปรเจกต์นี้เป็นตัวอย่างบริการ HTTP ขนาดเล็กเขียนด้วย **Golang + Fiber v2** โดยออกแบบตาม **Hexagonal Architecture (Ports & Adapters)** เพื่อให้สามารถทดสอบและขยายได้ง่าย จุดประสงค์คือสร้าง 2 endpoint สำหรับ
+
+* `POST /hmac/encrypt` — สร้าง HMAC (HMAC-SHA256) จากข้อความที่รับมา แล้วตอบกลับเป็น base64 encoded HMAC
+* `POST /hmac/decrypt` — ตรวจสอบความถูกต้องของ HMAC ที่ให้มา (validate) และตอบผลว่า `valid: true/false`
+
+ไฟล์ README นี้เขียนมาเพื่อใช้ร่วมกับ **copilot cli** — ให้คำอธิบายโครงสร้าง คำสั่งรัน ตัวอย่าง request/response และข้อแนะนำในการพัฒนา/ทดสอบ
+
+---
+
+## ข้อกำหนด
+
+* Go 1.20+ (แนะนำ)
+* Fiber v2
+* go.mod จัดการ dependencies
+* (ไม่จำเป็นแต่แนะนำ) Docker
+
+---
+
+## สถาปัตยกรรม (Hexagonal) — สรุปแบบสั้น
+
+Hexagonal แยกโค้ดเป็น 3 ชั้นหลัก:
+
+1. **Domain (Core)** — ธุรกิจหลัก: interface ของ usecase และ entity (เช่น `HMACService` interface)
+2. **Application / Usecases** — ตรรกะที่ใช้ domain interface (เช่น implement ฟังก์ชันสร้างและตรวจสอบ HMAC)
+3. **Adapters / Infrastructure** — ขาออก/ขาเข้า เช่น HTTP (Fiber), config, logger, storage (ถ้ามี)
+
+ไฟล์ควรจัดเป็น package ตาม boundary เหล่านี้ เพื่อให้ unit test ของ usecase ทำได้ง่ายโดย mocking ports
+
+---
+
+## โครงสร้างตัวอย่าง (ตัวอย่างโฟลเดอร์)
+
+```
+cmd/
+  server/main.go            # entrypoint ของแอป (wire up adapters -> app -> domain)
+internal/
+  domain/
+    hmac.go                 # entity / domain interfaces
+  usecase/
+    hmac_usecase.go         # implement logic (สร้างและตรวจสอบ)
+  adapter/
+    http/
+      handler.go            # Fiber handlers
+      routes.go
+    config/
+      config.go
+  infra/
+    hmac_impl.go            # implementation ของ HMAC (ถ้าอยากแยก)
+pkg/
+  utils/
+    encoding.go
+Dockerfile
+go.mod
+README.md
+
+```
+
+---
+
+## ตัวอย่าง API
+
+### POST /hmac/encrypt
+
+* **Request JSON**
+
+```json
+{
+  "message": "ข้อความใดๆ",
+  "key": "secret-key"
+}
+```
+
+* **Response JSON (200)**
+
+```json
+{
+  "hmac": "BASE64_ENCODED_HMAC",
+  "algorithm": "HMAC-SHA256"
+}
+```
+
+### POST /hmac/decrypt
+
+* **Request JSON**
+
+```json
+{
+  "message": "ข้อความใดๆ",
+  "key": "secret-key",
+  "hmac": "BASE64_ENCODED_HMAC_TO_VALIDATE"
+}
+```
+
+* **Response JSON (200)**
+
+```json
+{
+  "valid": true
+}
+```
+
+**สถานะข้อผิดพลาด** ควรส่งรหัส HTTP ที่เหมาะสม (400 สำหรับ bad request, 401/403 เมื่อ authorization ที่ต้องการล้มเหลว, 500 สำหรับ server error)
+
+---
+
+## ตัวอย่างการใช้ (curl)
+
+สร้าง hmac:
+
+```bash
+curl -s -X POST http://localhost:8080/hmac/encrypt \
+  -H "Content-Type: application/json" \
+  -d '{"message":"hello world","key":"mysecret"}'
+```
+
+ตรวจสอบ hmac:
+
+```bash
+curl -s -X POST http://localhost:8080/hmac/decrypt \
+  -H "Content-Type: application/json" \
+  -d '{"message":"hello world","key":"mysecret","hmac":"<base64>"}'
+```
+
+---
+
+## ตัวอย่างโค้ดสำคัญ (อ้างอิงแนวทาง)
+
+**Domain interface (internal/domain/hmac.go)**
+
+```go
+package domain
+
+type HMACService interface {
+    Generate(message, key string) (string, error)
+    Verify(message, key, hmac string) (bool, error)
+}
+```
+
+**Usecase implementation (internal/usecase/hmac_usecase.go)**
+
+```go
+package usecase
+
+import (
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/base64"
+    "errors"
+)
+
+type hmacService struct{}
+
+func NewHMACService() domain.HMACService {
+    return &hmacService{}
+}
+
+func (s *hmacService) Generate(message, key string) (string, error) {
+    if key == "" {
+        return "", errors.New("key required")
+    }
+    mac := hmac.New(sha256.New, []byte(key))
+    mac.Write([]byte(message))
+    sum := mac.Sum(nil)
+    return base64.StdEncoding.EncodeToString(sum), nil
+}
+
+func (s *hmacService) Verify(message, key, received string) (bool, error) {
+    expected, err := s.Generate(message, key)
+    if err != nil {
+        return false, err
+    }
+    return hmac.Equal([]byte(expected), []byte(received)), nil
+}
+```
+
+> หมายเหตุ: ในการเปรียบเทียบ HMAC ให้ใช้ `hmac.Equal` เพื่อป้องกัน timing attacks
+
+---
+
+## HTTP Adapter (Fiber)
+
+* สร้าง handler ที่รับ request แล้วเรียก usecase
+* แยก validation ของ request, mapping DTO -> domain
+
+ตัวอย่าง route registration (cmd/server/main.go):
+
+```go
+app.Post("/hmac/encrypt", handler.Encrypt)
+app.Post("/hmac/decrypt", handler.Decrypt)
+```
+
+---
+
+## Config / Secrets
+
+ห้ามเก็บ secret (เช่น key) ใน repo สาธารณะ ใช้ environment variables หรือ secret manager
+
+ตัวอย่าง env vars:
+
+```
+PORT=8080
+LOG_LEVEL=debug
+```
+
+---
+
+## การทดสอบ
+
+* เขียน unit test สำหรับ usecase (mocking adapters)
+* integration test สำหรับ HTTP endpoints (ใช้ httptest หรือ fiber's test utilities)
+
+ตัวอย่าง `go test ./...` เพื่อรันทดสอบทั้งหมด
+
+---
+
+## Docker (optional)
+
+ตัวอย่าง Dockerfile แบบง่าย:
+
+```dockerfile
+FROM golang:1.20-alpine AS build
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /hmac-service ./cmd/server
+
+FROM alpine:latest
+COPY --from=build /hmac-service /hmac-service
+EXPOSE 8080
+ENTRYPOINT ["/hmac-service"]
+```
+
+---
+
+## การใช้งานกับ copilot cli
+
+* README นี้ออกแบบมาเพื่อให้ `copilot cli` หรือเครื่องมือสร้างโครงการอัตโนมัติอื่นๆ สามารถอ่าน spec แล้ว scaffold ได้ง่าย
+* เพิ่มไฟล์ `copilot.yaml` หรือ `manifest` ตามที่ copilot cli ต้องการ (ถ้าจำเป็น)
+
+---
+
+## ข้อควรระวังด้านความปลอดภัย
+
+* อย่าส่งคีย์ลับใน URL (ใช้ body หรือ header ที่เข้ารหัส)
+* จำกัดขนาด `message` เพื่อป้องกัน DoS
+* พิจารณา rate limit และ logging ที่ไม่เก็บข้อมูลลับ
+
+---
+
+## ขยายเพิ่มเติม
+
+* เพิ่ม authorization (API key / JWT) สำหรับการใช้งานที่ต้องการความปลอดภัย
+* เปลี่ยน algorithm หรือเพิ่ม options (HMAC-SHA512)
+* เชื่อมกับ secret manager เช่น HashiCorp Vault หรือ AWS Secrets Manager
+
+---
+
+## License
+
+กำหนดเป็น MIT หรือที่ต้องการ
+
+---
+
+## ผู้ดูแล
+
+เขียนโดย README generator — ปรับแต่งได้ตามต้องการ
